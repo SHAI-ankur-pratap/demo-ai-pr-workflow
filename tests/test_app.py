@@ -1,5 +1,5 @@
 import pytest
-from src.app import add, subtract, multiply, divide, calculate
+from src.app import add, subtract, multiply, divide, power, calculate
 
 
 def test_add():
@@ -28,11 +28,18 @@ def test_divide_by_zero():
         divide(10, 0)
 
 
+def test_power():
+    assert power(2, 8) == 256.0
+    assert power(3, 3) == 27.0
+    assert power(5, 0) == 1.0
+
+
 def test_calculate_dispatch():
     assert calculate("add", 1, 2) == 3
     assert calculate("multiply", 3, 4) == 12
+    assert calculate("power", 2, 10) == 1024.0
 
 
 def test_calculate_unknown_operation():
     with pytest.raises(ValueError, match="Unknown operation"):
-        calculate("power", 2, 3)
+        calculate("modulo", 10, 3)
