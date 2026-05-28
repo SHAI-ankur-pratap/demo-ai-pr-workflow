@@ -1,0 +1,66 @@
+name: AI Auto-Merge (Claude Code Bot)
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude-merge:
+    name: Claude Code Bot Merges on Approval
+    # Only runs when a stakeholder approves — not on "Request Changes" or "Comment"
+    if: |
+      github.event.review.state == 'approved' &&
+      github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify approver is an authorized stakeholder
+        env:
+          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
+          AUTHORIZED_APPROVERS: ${{ secrets.AUTHORIZED_APPROVERS }}
+        run: |
+          APPROVER="${{ github.event.review.user.login }}"
+          echo "Approval from: $APPROVER"
+
+          # AUTHORIZED_APPROVERS is a comma-separated list stored in secrets
+          # e.g. "SHAI-ankur-pratap,delivery-head-username"
+          if [ -n "$AUTHORIZED_APPROVERS" ]; then
+            if echo "$AUTHORIZED_APPROVERS" | tr ',' '\n' | grep -qx "$APPROVER"; then
+              echo "✅ Authorized stakeholder approved: $APPROVER"
+            else
+              echo "❌ Approver $APPROVER is not in the authorized stakeholders list. Skipping merge."
+              exit 0
+            fi
+          else
+            echo "⚠️  AUTHORIZED_APPROVERS secret not set — accepting any approval. Set it in repo secrets."
+          fi
+
+      - name: Post merge-in-progress comment
+        env:
+          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "✅ **Stakeholder approved.** Claude Code bot is merging this PR now..."
+
+      - name: Merge PR via Claude Code bot token
+        env:
+          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
+        run: |
+          gh pr merge ${{ github.event.pull_request.number }} \
+            --squash \
+            --delete-branch \
+            --subject "$(gh pr view ${{ github.event.pull_request.number }} --json title -q .title) [merged by Claude Code bot]"
+
+      - name: Post merge success comment
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "🎉 **Merged by Claude Code bot.** No human pushed this merge — only the AI bot has merge access to \`main\`."
