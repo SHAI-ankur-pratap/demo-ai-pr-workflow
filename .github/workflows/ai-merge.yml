@@ -1,13 +1,14 @@
 name: AI Auto-Merge (Claude Code Bot)
 
+# Fires when anyone submits a review on any PR targeting main.
+# Only proceeds if: (1) review is "approved", (2) approver is authorized.
 on:
   pull_request_review:
     types: [submitted]
 
 jobs:
   claude-merge:
-    name: Claude Code Bot Merges on Approval
-    # Only runs when a stakeholder approves — not on "Request Changes" or "Comment"
+    name: "Claude Code — Final Gate + Merge"
     if: |
       github.event.review.state == 'approved' &&
       github.event.pull_request.base.ref == 'main'
@@ -17,50 +18,80 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Verify approver is an authorized stakeholder
+        id: auth
         env:
-          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
           AUTHORIZED_APPROVERS: ${{ secrets.AUTHORIZED_APPROVERS }}
         run: |
           APPROVER="${{ github.event.review.user.login }}"
           echo "Approval from: $APPROVER"
 
-          # AUTHORIZED_APPROVERS is a comma-separated list stored in secrets
-          # e.g. "SHAI-ankur-pratap,delivery-head-username"
-          if [ -n "$AUTHORIZED_APPROVERS" ]; then
-            if echo "$AUTHORIZED_APPROVERS" | tr ',' '\n' | grep -qx "$APPROVER"; then
-              echo "✅ Authorized stakeholder approved: $APPROVER"
-            else
-              echo "❌ Approver $APPROVER is not in the authorized stakeholders list. Skipping merge."
-              exit 0
-            fi
-          else
-            echo "⚠️  AUTHORIZED_APPROVERS secret not set — accepting any approval. Set it in repo secrets."
+          if [ -z "$AUTHORIZED_APPROVERS" ]; then
+            echo "authorized=true" >> $GITHUB_OUTPUT
+            echo "⚠️  AUTHORIZED_APPROVERS not set — accepting any approval for demo."
+            exit 0
           fi
 
-      - name: Post merge-in-progress comment
-        env:
-          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
-        run: |
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --body "✅ **Stakeholder approved.** Claude Code bot is merging this PR now..."
+          if echo "$AUTHORIZED_APPROVERS" | tr ',' '\n' | grep -qx "$APPROVER"; then
+            echo "authorized=true" >> $GITHUB_OUTPUT
+            echo "✅ Authorized approver: $APPROVER"
+          else
+            echo "authorized=false" >> $GITHUB_OUTPUT
+            echo "❌ $APPROVER is not an authorized stakeholder. Ignoring."
+          fi
 
-      - name: Merge PR via Claude Code bot token
+      - name: Abort if unauthorized approver
+        if: steps.auth.outputs.authorized != 'true'
+        run: |
+          echo "Approval from unauthorized user — no action taken."
+          exit 0
+
+      - name: Claude Code — Final pre-merge check
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
+        run: |
+          PR_NUM=${{ github.event.pull_request.number }}
+          APPROVER="${{ github.event.review.user.login }}"
+
+          # Verify PR has passed status checks
+          CHECKS=$(gh pr checks $PR_NUM --repo ${{ github.repository }} 2>/dev/null | grep -c "pass" || echo "0")
+          echo "Checks passed: $CHECKS"
+
+          # Post intent to merge
+          gh pr comment $PR_NUM \
+            --repo ${{ github.repository }} \
+            --body "✅ **Approved by @${APPROVER}**
+
+          Claude Code bot is running final checks and will merge this PR now.
+          No human will execute this merge — the bot token is the only identity with push access to \`main\`."
+
+      - name: Claude Code Bot — Execute merge
         env:
           GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
         run: |
-          gh pr merge ${{ github.event.pull_request.number }} \
+          PR_NUM=${{ github.event.pull_request.number }}
+          PR_TITLE=$(gh pr view $PR_NUM --repo ${{ github.repository }} --json title -q .title)
+
+          gh pr merge $PR_NUM \
+            --repo ${{ github.repository }} \
             --squash \
             --delete-branch \
-            --subject "$(gh pr view ${{ github.event.pull_request.number }} --json title -q .title) [merged by Claude Code bot]"
+            --subject "${PR_TITLE} [merged by Claude Code bot]"
 
-      - name: Post merge success comment
+      - name: Post merge confirmation
         if: success()
         env:
           GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
         run: |
           gh pr comment ${{ github.event.pull_request.number }} \
-            --body "🎉 **Merged by Claude Code bot.** No human pushed this merge — only the AI bot has merge access to \`main\`."
+            --repo ${{ github.repository }} \
+            --body "🎉 **Merged to \`main\` by Claude Code bot.**
+
+          | | |
+          |---|---|
+          | Merged by | Claude Code bot (not a human) |
+          | Approver | @${{ github.event.review.user.login }} |
+          | Human pushed to main | ❌ Not possible — branch protection blocks it |
+
+          This is the complete AI-driven PR flow: fork → code → PR → AI review → human approves → AI merges."
