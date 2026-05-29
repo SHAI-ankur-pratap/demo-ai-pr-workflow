@@ -1,8 +1,8 @@
-name: AI Code Review (Claude Code)
+name: AI Code Review (Claude via LiteLLM)
 
-# pull_request_target runs in the context of the BASE repo (main), not the fork.
-# This means it has access to secrets even when the PR comes from an external fork.
-# We only read the diff — we never execute fork code — so this is safe.
+# pull_request_target runs in the BASE repo context — has access to secrets
+# even when PR comes from an external fork. We only read the diff (never execute
+# fork code), so this is safe.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
@@ -10,110 +10,105 @@ on:
 
 jobs:
   claude-review:
-    name: "Claude Code — Step 1: Review"
+    name: "Step 1 — Claude reviews the PR"
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
       contents: read
 
     steps:
-      - name: Checkout base repo (safe — not the fork code)
-        uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
-
-      - name: Get PR diff from fork
+      - name: Get PR diff
         id: diff
         env:
           GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
         run: |
           DIFF=$(gh pr diff ${{ github.event.pull_request.number }} \
-            --repo ${{ github.repository }} 2>/dev/null)
-          echo "DIFF<<EOF" >> $GITHUB_OUTPUT
-          echo "$DIFF" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+            --repo ${{ github.repository }})
+          # Store in file to avoid env var size limits
+          echo "$DIFF" > /tmp/pr_diff.txt
+          echo "lines=$(wc -l < /tmp/pr_diff.txt)" >> $GITHUB_OUTPUT
 
-      - name: Claude Code — Code Review
+      - name: Claude — Code Review
         id: review
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_MODEL: ${{ secrets.LITELLM_MODEL }}
         run: |
-          REVIEW=$(claude --print << 'PROMPT'
-          You are a senior engineer doing a code review. Review the PR diff below.
+          DIFF=$(cat /tmp/pr_diff.txt)
+          PAYLOAD=$(jq -n \
+            --arg model "${LITELLM_MODEL:-gemini-pro}" \
+            --arg diff "$DIFF" \
+            '{
+              model: $model,
+              messages: [{
+                role: "user",
+                content: ("You are a senior engineer doing a code review. Review this PR diff carefully.\n\nEvaluate:\n1. Correctness — any bugs or logic errors?\n2. Edge cases — what inputs could break this?\n3. Code quality — naming, structure, readability\n4. Test coverage — are the tests adequate?\n\nEnd with exactly one of:\n✅ LGTM — safe to merge\n⚠️ MINOR ISSUES — can merge, but note these\n❌ CHANGES REQUIRED — must fix before merge\n\nBe direct and specific. Under 350 words.\n\nDIFF:\n" + $diff)
+              }],
+              max_tokens: 1024
+            }')
+          RESPONSE=$(curl -s -X POST "${LITELLM_BASE_URL}chat/completions" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $LITELLM_API_KEY" \
+            -d "$PAYLOAD")
+          REVIEW=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Review unavailable."')
+          echo "$REVIEW" > /tmp/review.txt
+          echo "done=true" >> $GITHUB_OUTPUT
 
-          Evaluate:
-          1. Correctness — any bugs or logic errors?
-          2. Edge cases — what inputs could break this?
-          3. Code quality — naming, structure, readability
-          4. Test coverage — are the tests adequate?
-
-          End with one of:
-          ✅ LGTM — safe to merge
-          ⚠️  MINOR ISSUES — can merge, but note these
-          ❌ CHANGES REQUIRED — must fix before merge
-
-          Keep it under 350 words. Be direct.
-
-          DIFF:
-          ${{ steps.diff.outputs.DIFF }}
-          PROMPT
-          )
-          echo "REVIEW<<EOF" >> $GITHUB_OUTPUT
-          echo "$REVIEW" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Claude Code — Security Scan
+      - name: Claude — Security Scan
         id: security
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_MODEL: ${{ secrets.LITELLM_MODEL }}
         run: |
-          SECURITY=$(claude --print << 'PROMPT'
-          You are a security reviewer. Scan this diff for security issues only.
-          Check for: injection vulnerabilities, hardcoded secrets, unsafe inputs,
-          dangerous function calls, dependency risks.
+          DIFF=$(cat /tmp/pr_diff.txt)
+          PAYLOAD=$(jq -n \
+            --arg model "${LITELLM_MODEL:-gemini-pro}" \
+            --arg diff "$DIFF" \
+            '{
+              model: $model,
+              messages: [{
+                role: "user",
+                content: ("Security scan only. Check for: SQL injection, hardcoded secrets, unsafe inputs, dangerous functions, dependency issues.\n\nIf clean: \"🔒 No security issues found.\"\nIf issues found: list each with severity LOW/MEDIUM/HIGH and exact line.\nUnder 150 words.\n\nDIFF:\n" + $diff)
+              }],
+              max_tokens: 512
+            }')
+          RESPONSE=$(curl -s -X POST "${LITELLM_BASE_URL}chat/completions" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $LITELLM_API_KEY" \
+            -d "$PAYLOAD")
+          SECURITY=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Scan unavailable."')
+          echo "$SECURITY" > /tmp/security.txt
 
-          If clean: "🔒 Security: No issues found."
-          If issues: list each with severity (LOW/MEDIUM/HIGH) and the exact line.
-
-          Keep it under 150 words.
-
-          DIFF:
-          ${{ steps.diff.outputs.DIFF }}
-          PROMPT
-          )
-          echo "SECURITY<<EOF" >> $GITHUB_OUTPUT
-          echo "$SECURITY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Post Claude's review as PR comment
+      - name: Post full review as PR comment
         env:
           GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
         run: |
+          REVIEW=$(cat /tmp/review.txt)
+          SECURITY=$(cat /tmp/security.txt)
           AUTHOR="${{ github.event.pull_request.user.login }}"
           FORK="${{ github.event.pull_request.head.repo.full_name }}"
-          BRANCH="${{ github.event.pull_request.head.ref }}"
 
           gh pr comment ${{ github.event.pull_request.number }} \
             --repo ${{ github.repository }} \
-            --body "## 🤖 Claude Code Review
+            --body "## 🤖 AI Code Review
 
-          **PR from fork:** \`${FORK}\` → \`main\`
+          **PR from:** \`${FORK}\` → \`main\`
           **Author:** @${AUTHOR}
 
           ---
 
-          ### Code Review
-          ${{ steps.review.outputs.REVIEW }}
+          ### 📋 Code Review
+          ${REVIEW}
 
           ---
 
-          ### Security Scan
-          ${{ steps.security.outputs.SECURITY }}
+          ### 🔒 Security Scan
+          ${SECURITY}
 
           ---
 
-          > An authorized stakeholder must **Approve** this PR to proceed.
-          > Claude Code bot will handle the merge — no human can push to \`main\` directly."
+          > **Next step:** An authorized stakeholder must click **Approve** on this PR.
+          > The AI bot will then execute the merge automatically.
+          > No human can push directly to \`main\`."
