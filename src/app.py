@@ -1,5 +1,5 @@
 """
-Simple calculator app — this is the "codebase" that AI reviews when PRs are opened.
+Simple calculator app — reviewed by AI on every PR from every fork.
 """
 
 
@@ -25,6 +25,12 @@ def power(base: float, exponent: float) -> float:
     return base ** exponent
 
 
+def modulo(a: float, b: float) -> float:
+    if b == 0:
+        raise ValueError("Cannot modulo by zero")
+    return a % b
+
+
 def calculate(operation: str, a: float, b: float) -> float:
     ops = {
         "add": add,
@@ -32,9 +38,12 @@ def calculate(operation: str, a: float, b: float) -> float:
         "multiply": multiply,
         "divide": divide,
         "power": power,
+        "modulo": modulo,
     }
     if operation not in ops:
-        raise ValueError(f"Unknown operation: {operation}. Choose from {list(ops.keys())}")
+        raise ValueError(
+            f"Unknown operation: '{operation}'. Choose from: {sorted(ops.keys())}"
+        )
     return ops[operation](a, b)
 
 
@@ -42,3 +51,4 @@ if __name__ == "__main__":
     print(calculate("add", 10, 5))       # 15.0
     print(calculate("divide", 10, 2))    # 5.0
     print(calculate("power", 2, 8))      # 256.0
+    print(calculate("modulo", 10, 3))    # 1.0
