@@ -1,5 +1,5 @@
 import pytest
-from src.app import add, subtract, multiply, divide, power, calculate
+from src.app import add, subtract, multiply, divide, power, modulo, calculate
 
 
 def test_add():
@@ -34,12 +34,24 @@ def test_power():
     assert power(5, 0) == 1.0
 
 
+def test_modulo():
+    assert modulo(10, 3) == 1.0
+    assert modulo(7, 2) == 1.0
+    assert modulo(9, 3) == 0.0
+
+
+def test_modulo_by_zero():
+    with pytest.raises(ValueError, match="Cannot modulo by zero"):
+        modulo(10, 0)
+
+
 def test_calculate_dispatch():
     assert calculate("add", 1, 2) == 3
     assert calculate("multiply", 3, 4) == 12
     assert calculate("power", 2, 10) == 1024.0
+    assert calculate("modulo", 10, 3) == 1.0
 
 
 def test_calculate_unknown_operation():
     with pytest.raises(ValueError, match="Unknown operation"):
-        calculate("modulo", 10, 3)
+        calculate("sqrt", 16, 0)
